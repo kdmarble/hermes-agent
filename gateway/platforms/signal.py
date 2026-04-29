@@ -1270,3 +1270,35 @@ class SignalAdapter(BasePlatformAdapter):
             "type": "dm",
             "chat_id": chat_id,
         }
+
+    # ------------------------------------------------------------------
+    # Edit / Delete (no-op — Signal API doesn't support editing)
+    # ------------------------------------------------------------------
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        """Signal doesn't support message editing.
+
+        Return success=True as a no-op so the gateway treats Signal as
+        edit-capable and sends tool-progress events as separate messages
+        rather than draining the progress queue.  The content is ignored
+        — nothing is actually edited.
+        """
+        return SendResult(success=True)
+
+    async def delete_message(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> SendResult:
+        """Signal doesn't support message deletion via this adapter.
+
+        Return success=True as a no-op for the same reason as edit_message.
+        """
+        return SendResult(success=True)
