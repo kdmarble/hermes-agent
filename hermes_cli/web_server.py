@@ -3516,4 +3516,7 @@ def start_server(
         threading.Thread(target=_open, daemon=True).start()
 
     print(f"  Hermes Web UI → http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # Chat WebSockets intentionally gate on the direct socket peer.  If
+    # uvicorn applies proxy headers, a local Caddy reverse proxy can rewrite
+    # the peer to the browser's LAN IP and trip the loopback-only guard.
+    uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)
