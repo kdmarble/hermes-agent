@@ -1,0 +1,3 @@
+name: personal-context
+version: 2.2.0
+description: "personal-context ambient memory provider shim for the real plugin at ~/homelab/hermes-plugins/personal-context/."
