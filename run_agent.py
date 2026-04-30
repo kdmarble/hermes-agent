@@ -2542,6 +2542,67 @@ class AIAgent:
             "api_mode": getattr(self, "api_mode", "") or "",
         }
 
+    def _background_review_runtime(self) -> Dict[str, Any]:
+        """Return the configured background-review runtime, or the main runtime."""
+        parent_runtime = self._current_main_runtime()
+        runtime = dict(parent_runtime)
+        runtime["max_iterations"] = 8
+        runtime["credential_pool"] = getattr(self, "_credential_pool", None)
+
+        try:
+            from hermes_cli.config import load_config as _load_config
+            cfg = _load_config() or {}
+            review_cfg = cfg.get("background_review") or {}
+        except Exception:
+            review_cfg = {}
+
+        if not isinstance(review_cfg, dict):
+            return runtime
+
+        configured_model = str(review_cfg.get("model") or "").strip()
+        configured_provider = str(review_cfg.get("provider") or "").strip()
+        if configured_model:
+            runtime["model"] = configured_model
+
+        try:
+            max_iterations = int(review_cfg.get("max_iterations"))
+        except (TypeError, ValueError):
+            max_iterations = 8
+        if max_iterations > 0:
+            runtime["max_iterations"] = max_iterations
+
+        if not configured_provider:
+            return runtime
+
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            resolved = resolve_runtime_provider(
+                requested=configured_provider,
+                target_model=runtime.get("model") or None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Background review provider resolution failed for %r; using parent runtime: %s",
+                configured_provider,
+                exc,
+            )
+            parent_runtime = self._current_main_runtime()
+            parent_runtime["max_iterations"] = runtime["max_iterations"]
+            parent_runtime["credential_pool"] = getattr(self, "_credential_pool", None)
+            return parent_runtime
+
+        runtime.update(
+            {
+                "model": configured_model or resolved.get("model") or parent_runtime.get("model", ""),
+                "provider": resolved.get("provider") or configured_provider,
+                "api_mode": resolved.get("api_mode") or "",
+                "base_url": resolved.get("base_url") or "",
+                "api_key": resolved.get("api_key") or "",
+                "credential_pool": resolved.get("credential_pool"),
+            }
+        )
+        return runtime
+
     def _check_compression_model_feasibility(self) -> None:
         """Warn at session start if the auxiliary compression model's context
         window is smaller than the main model's compression threshold.
@@ -3544,25 +3605,20 @@ class AIAgent:
                 with open(os.devnull, "w") as _devnull, \
                      contextlib.redirect_stdout(_devnull), \
                      contextlib.redirect_stderr(_devnull):
-                    # Inherit the parent agent's live runtime (provider, model,
-                    # base_url, api_key, api_mode) so the fork uses the exact
-                    # same credentials the main turn is using.  Without this,
-                    # AIAgent.__init__ re-runs auto-resolution from env vars,
-                    # which fails for OAuth-only providers, session-scoped
-                    # creds, or credential-pool setups where the resolver can't
-                    # reconstruct auth from scratch -- producing the spurious
-                    # "No LLM provider configured" warning at end of turn.
-                    _parent_runtime = self._current_main_runtime()
+                    # Use the configured background-review runtime when present;
+                    # otherwise inherit the parent runtime so session-scoped
+                    # credentials keep working.
+                    _review_runtime = self._background_review_runtime()
                     review_agent = AIAgent(
-                        model=self.model,
-                        max_iterations=8,
+                        model=_review_runtime.get("model") or self.model,
+                        max_iterations=_review_runtime.get("max_iterations") or 8,
                         quiet_mode=True,
                         platform=self.platform,
-                        provider=self.provider,
-                        api_mode=_parent_runtime.get("api_mode") or None,
-                        base_url=_parent_runtime.get("base_url") or None,
-                        api_key=_parent_runtime.get("api_key") or None,
-                        credential_pool=getattr(self, "_credential_pool", None),
+                        provider=_review_runtime.get("provider") or None,
+                        api_mode=_review_runtime.get("api_mode") or None,
+                        base_url=_review_runtime.get("base_url") or None,
+                        api_key=_review_runtime.get("api_key") or None,
+                        credential_pool=_review_runtime.get("credential_pool"),
                         parent_session_id=self.session_id,
                         enabled_toolsets=["memory", "skills"],
                     )

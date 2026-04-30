@@ -56,6 +56,7 @@ def test_background_review_shuts_down_memory_provider_before_close(monkeypatch):
 
     monkeypatch.setattr(run_agent_module, "AIAgent", FakeReviewAgent)
     monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
 
     agent = _bare_agent()
 
@@ -102,6 +103,7 @@ def test_background_review_installs_auto_deny_approval_callback(monkeypatch):
 
     monkeypatch.setattr(run_agent_module, "AIAgent", FakeReviewAgent)
     monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
 
     # Start from a clean slot.
     tt.set_approval_callback(None)
@@ -127,3 +129,74 @@ def test_background_review_installs_auto_deny_approval_callback(monkeypatch):
         "Background review leaked its approval callback into the worker "
         "thread's TLS slot; a recycled thread-id could reuse it."
     )
+
+
+def test_background_review_uses_configured_runtime(monkeypatch):
+    events = []
+
+    class FakeReviewAgent:
+        def __init__(self, **kwargs):
+            events.append(("init", kwargs))
+            self._session_messages = []
+
+        def run_conversation(self, **kwargs):
+            events.append(("run_conversation", kwargs))
+
+        def shutdown_memory_provider(self):
+            events.append(("shutdown_memory_provider", None))
+
+        def close(self):
+            events.append(("close", None))
+
+    def fake_resolve_runtime_provider(*, requested=None, target_model=None, **kwargs):
+        events.append(("resolve", {"requested": requested, "target_model": target_model}))
+        return {
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "base_url": "http://voyager:8080/v1",
+            "api_key": "voyager-key",
+            "credential_pool": "voyager-pool",
+        }
+
+    monkeypatch.setattr(run_agent_module, "AIAgent", FakeReviewAgent)
+    monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "background_review": {
+                "model": "qwen3.6-35b-bg",
+                "provider": "voyager",
+                "max_iterations": 2,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        fake_resolve_runtime_provider,
+    )
+
+    agent = _bare_agent()
+    agent.model = "qwen3.6-35b-q8"
+    agent.provider = "custom"
+    agent.base_url = "http://artemis:8080/v1"
+    agent.api_key = "artemis-key"
+
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=[{"role": "user", "content": "hello"}],
+        review_memory=True,
+    )
+
+    assert events[0] == (
+        "resolve",
+        {"requested": "voyager", "target_model": "qwen3.6-35b-bg"},
+    )
+    init_kwargs = events[1][1]
+    assert init_kwargs["model"] == "qwen3.6-35b-bg"
+    assert init_kwargs["provider"] == "custom"
+    assert init_kwargs["api_mode"] == "chat_completions"
+    assert init_kwargs["base_url"] == "http://voyager:8080/v1"
+    assert init_kwargs["api_key"] == "voyager-key"
+    assert init_kwargs["credential_pool"] == "voyager-pool"
+    assert init_kwargs["max_iterations"] == 2
+    assert init_kwargs["enabled_toolsets"] == ["memory", "skills"]
