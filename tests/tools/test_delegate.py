@@ -1157,6 +1157,34 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         result = _resolve_child_credential_pool("openrouter", parent)
         self.assertIs(result, mock_pool)
 
+    def test_same_provider_same_endpoint_shares_parent_pool(self):
+        parent = _make_mock_parent()
+        mock_pool = MagicMock()
+        parent._credential_pool = mock_pool
+
+        result = _resolve_child_credential_pool(
+            "openrouter",
+            parent,
+            effective_base_url="https://openrouter.ai/api/v1/",
+        )
+        self.assertIs(result, mock_pool)
+
+    def test_same_provider_different_endpoint_keeps_direct_child_credentials(self):
+        parent = _make_mock_parent()
+        parent.provider = "custom"
+        parent.base_url = "http://localhost:8080/v1"
+        parent._credential_pool = MagicMock()
+
+        with patch("agent.credential_pool.load_pool") as mock_load_pool:
+            result = _resolve_child_credential_pool(
+                "custom",
+                parent,
+                effective_base_url="http://10.10.30.2:8080/v1",
+            )
+
+        self.assertIsNone(result)
+        mock_load_pool.assert_not_called()
+
     def test_no_provider_inherits_parent_pool(self):
         parent = _make_mock_parent()
         mock_pool = MagicMock()

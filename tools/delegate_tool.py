@@ -1070,7 +1070,11 @@ def _build_child_agent(
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
-    child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
+    child_pool = _resolve_child_credential_pool(
+        effective_provider,
+        parent_agent,
+        effective_base_url=effective_base_url,
+    )
     if child_pool is not None:
         child._credential_pool = child_pool
 
@@ -2193,12 +2197,21 @@ def delegate_task(
     )
 
 
-def _resolve_child_credential_pool(effective_provider: Optional[str], parent_agent):
+def _normalize_credential_pool_base_url(base_url: Optional[str]) -> str:
+    return str(base_url or "").strip().rstrip("/")
+
+
+def _resolve_child_credential_pool(
+    effective_provider: Optional[str],
+    parent_agent,
+    *,
+    effective_base_url: Optional[str] = None,
+):
     """Resolve a credential pool for the child agent.
 
     Rules:
-    1. Same provider as the parent -> share the parent's pool so cooldown state
-       and rotation stay synchronized.
+    1. Same provider and same endpoint as the parent -> share the parent's pool
+       so cooldown state and rotation stay synchronized.
     2. Different provider -> try to load that provider's own pool.
     3. No pool available -> return None and let the child keep the inherited
        fixed credential behavior.
@@ -2208,8 +2221,23 @@ def _resolve_child_credential_pool(effective_provider: Optional[str], parent_age
 
     parent_provider = getattr(parent_agent, "provider", None) or ""
     parent_pool = getattr(parent_agent, "_credential_pool", None)
-    if parent_pool is not None and effective_provider == parent_provider:
-        return parent_pool
+    if effective_provider == parent_provider:
+        parent_base_url = _normalize_credential_pool_base_url(
+            getattr(parent_agent, "base_url", None)
+        )
+        child_base_url = _normalize_credential_pool_base_url(effective_base_url)
+        if parent_pool is not None:
+            if not child_base_url or not parent_base_url or child_base_url == parent_base_url:
+                return parent_pool
+            logger.debug(
+                "Not sharing parent credential pool for provider '%s': "
+                "child endpoint '%s' differs from parent endpoint '%s'",
+                effective_provider,
+                child_base_url,
+                parent_base_url,
+            )
+        if child_base_url and parent_base_url and child_base_url != parent_base_url:
+            return None
 
     try:
         from agent.credential_pool import load_pool
