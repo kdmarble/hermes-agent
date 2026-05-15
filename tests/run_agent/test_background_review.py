@@ -20,6 +20,9 @@ def _bare_agent() -> AIAgent:
     agent._memory_store = object()
     agent._memory_enabled = True
     agent._user_profile_enabled = False
+    agent._cached_system_prompt = "test-cached-system-prompt"
+    import datetime as _dt
+    agent.session_start = _dt.datetime(2026, 1, 1, 12, 0, 0)
     agent._MEMORY_REVIEW_PROMPT = "review memory"
     agent._SKILL_REVIEW_PROMPT = "review skills"
     agent._COMBINED_REVIEW_PROMPT = "review both"
@@ -199,7 +202,7 @@ def test_background_review_uses_configured_runtime(monkeypatch):
     assert init_kwargs["api_key"] == "voyager-key"
     assert init_kwargs["credential_pool"] == "voyager-pool"
     assert init_kwargs["max_iterations"] == 2
-    assert init_kwargs["enabled_toolsets"] == ["memory", "skills"]
+    assert "enabled_toolsets" not in init_kwargs
 
 
 def test_background_review_summary_is_attributed_to_self_improvement_loop(monkeypatch):
