@@ -4,6 +4,7 @@ Import-safe module with no dependencies — can be imported from anywhere
 without risk of circular imports.
 """
 
+import contextvars
 import os
 import sysconfig
 from contextvars import ContextVar, Token
@@ -39,6 +40,11 @@ def get_hermes_home_override() -> str | None:
         return None
     return str(override)
 
+# Allow per-sender HERMES_HOME override for multi-user gateway routing.
+_sender_hermes_home: contextvars.ContextVar["Path | None"] = contextvars.ContextVar(
+    "_sender_hermes_home", default=None
+)
+
 
 def get_hermes_home() -> Path:
     """Return the Hermes home directory (default: ~/.hermes).
@@ -56,9 +62,15 @@ def get_hermes_home() -> Path:
     template in ``hermes_cli/gateway.py`` and the kanban dispatcher in
     ``hermes_cli/kanban_db.py``).  See https://github.com/NousResearch/hermes-agent/issues/18594.
     """
+    # Context-local override (e.g. cron profile home, workspace routing)
     override = get_hermes_home_override()
     if override:
         return Path(override)
+
+    # Sender-level override (multi-user gateway routing)
+    _sender_override = _sender_hermes_home.get()
+    if _sender_override is not None:
+        return _sender_override
 
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:

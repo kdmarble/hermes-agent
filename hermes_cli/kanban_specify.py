@@ -40,11 +40,6 @@ from typing import Optional
 
 from hermes_cli import kanban_db as kb
 
-HERMES_KANBAN_SPECIFY_MAX_TOKENS = max(
-    1500,
-    int(os.getenv("HERMES_KANBAN_SPECIFY_MAX_TOKENS", "6000")),
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -161,9 +156,20 @@ def specify_task(
 
     try:
         from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
+        from hermes_cli.config import load_config
     except Exception as exc:  # pragma: no cover — import smoke test
         logger.debug("specify: auxiliary client import failed: %s", exc)
         return SpecifyOutcome(task_id, False, "auxiliary client unavailable")
+
+    # Merge auxiliary.extra_body from config with Nous Portal tags
+    merged_extra: Optional[dict] = dict(get_auxiliary_extra_body()) or None
+    try:
+        cfg = load_config()
+        task_extra = (cfg or {}).get("auxiliary", {}).get("triage_specifier", {}).get("extra_body", {})
+        if task_extra:
+            merged_extra = {**(merged_extra or {}), **task_extra}
+    except Exception:
+        pass
 
     try:
         client, model = get_text_auxiliary_client("triage_specifier")
@@ -190,9 +196,9 @@ def specify_task(
                 {"role": "user", "content": user_msg},
             ],
             temperature=0.3,
-            max_tokens=HERMES_KANBAN_SPECIFY_MAX_TOKENS,
+            max_tokens=1500,
             timeout=timeout or 120,
-            extra_body=get_auxiliary_extra_body() or None,
+            extra_body=merged_extra or None,
         )
     except Exception as exc:
         logger.info(
@@ -204,7 +210,8 @@ def specify_task(
         )
 
     try:
-        raw = (resp.choices[0].message.content or "").strip()
+        msg = resp.choices[0].message
+        raw = (msg.content or msg.reasoning_content or "")
     except Exception:
         raw = ""
 

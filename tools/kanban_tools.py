@@ -636,6 +636,48 @@ def _handle_comment(args: dict, **kw) -> str:
         return tool_error(f"kanban_comment: {e}")
 
 
+def _try_auto_subscribe(conn, task_id: str) -> None:  # sqlite3.Connection
+    """Best-effort auto-subscribe the current gateway session for kanban
+    notifications.  No-op when not running through the gateway.
+
+    Reads session context from ``gateway.session_context`` (ContextVar-based,
+    concurrency-safe) to determine the platform, chat_id, and thread_id.
+    If any are missing (CLI, cron, kanban worker subprocess), silently
+    skips — those contexts don't need notifications.
+    """
+    try:
+        from gateway.session_context import get_session_env
+        from hermes_cli import kanban_db as _kb
+
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "")
+        user_id = get_session_env("HERMES_SESSION_USER_ID", "")
+    except (ImportError, ModuleNotFoundError):
+        # Not running in gateway context (CLI, cron, kanban worker)
+        return
+
+    if not platform or not chat_id:
+        return
+
+    try:
+        notifier_profile = os.environ.get("HERMES_PROFILE")
+        _kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id or None,
+            user_id=user_id or None,
+            notifier_profile=notifier_profile,
+        )
+    except Exception:
+        # Non-fatal — the user can always manually subscribe via
+        # ``hermes kanban notify-subscribe``.  Silently skip to avoid
+        # surfacing noise on task creation.
+        pass
+
+
 def _handle_create(args: dict, **kw) -> str:
     """Create a child task. Orchestrator workers use this to fan out.
 
@@ -707,6 +749,16 @@ def _handle_create(args: dict, **kw) -> str:
                 session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)
+
+            # Auto-subscribe the current gateway session for terminal
+            # notifications (completed, blocked, crashed, etc.).  This is
+            # the tool-level counterpart to the gateway's slash-command
+            # auto-subscribe (run.py _kanban_command).  Without this, tasks
+            # created via natural language ("create a kanban task to...")
+            # never generate Signal/Telegram/Discord notifications because
+            # kanban_notify_subs stays empty.
+            _try_auto_subscribe(conn, new_tid)
+
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
