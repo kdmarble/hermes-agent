@@ -770,6 +770,28 @@ async def test_run_agent_rolls_progress_bubble_before_platform_limit(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_run_agent_non_editing_signal_sends_tool_progress_without_edits(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FakeAgent,
+        session_id="sess-signal-progress-no-edit",
+        config_data={"display": {"tool_progress": "all", "interim_assistant_messages": False}},
+        platform=Platform.SIGNAL,
+        chat_id="signal-group",
+        chat_type="group",
+        thread_id=None,
+        adapter_cls=NonEditingProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.edits == []
+    progress_text = "\n".join(call["content"] for call in adapter.sent)
+    assert 'terminal: "pwd"' in progress_text
+    assert 'browser_navigate: "https://example.com"' in progress_text
+
+
+@pytest.mark.asyncio
 async def test_run_agent_surfaces_real_interim_commentary(monkeypatch, tmp_path):
     adapter, result = await _run_with_agent(
         monkeypatch,

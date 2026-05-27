@@ -15706,6 +15706,8 @@ class GatewayRunner:
 
                     # Handle dedup messages: update last line with repeat counter
                     if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
+                        if not can_edit:
+                            continue
                         _, base_msg, count = raw
                         if progress_lines:
                             progress_lines[-1] = f"{base_msg} (×{count + 1})"
@@ -15726,7 +15728,18 @@ class GatewayRunner:
                         continue
                     else:
                         msg = raw
-                        progress_lines.append(msg)
+                        if can_edit:
+                            progress_lines.append(msg)
+
+                    if not can_edit:
+                        result = await _send_progress_text(str(msg))
+                        if result.success and result.message_id:
+                            progress_msg_id = result.message_id
+                        _last_edit_ts = time.monotonic()
+                        await asyncio.sleep(0.3)
+                        if _run_still_current():
+                            await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                        continue
 
                     if await _roll_progress_overflow_if_needed():
                         _last_edit_ts = time.monotonic()
@@ -15807,7 +15820,7 @@ class GatewayRunner:
                             raw = progress_queue.get_nowait()
                             if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
                                 _, base_msg, count = raw
-                                if progress_lines:
+                                if can_edit and progress_lines:
                                     progress_lines[-1] = f"{base_msg} (×{count + 1})"
                                     await _roll_progress_overflow_if_needed()
                             elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
@@ -15826,8 +15839,11 @@ class GatewayRunner:
                                 last_progress_msg[0] = None
                                 repeat_count[0] = 0
                             else:
-                                progress_lines.append(raw)
-                                await _roll_progress_overflow_if_needed()
+                                if can_edit:
+                                    progress_lines.append(raw)
+                                    await _roll_progress_overflow_if_needed()
+                                else:
+                                    await _send_progress_text(str(raw))
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)
