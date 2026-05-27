@@ -15560,31 +15560,121 @@ class GatewayRunner:
             if not adapter:
                 return
 
-            # Platforms without edit support normally drop tool progress because
-            # each update becomes a permanent bubble.  If the user explicitly
-            # opts this platform into tool_progress, honor that preference and
-            # send one message per tool instead of silently draining the queue.
-            _explicit_platform_tool_progress = (
-                isinstance(_platform_cfg, dict)
-                and "tool_progress" in _platform_cfg
-            ) or (
-                isinstance(_legacy_tp_overrides, dict)
-                and platform_key in _legacy_tp_overrides
+            _supports_edit_attr = getattr(adapter, "SUPPORTS_MESSAGE_EDITING", None)
+            _adapter_has_edit_override = (
+                type(adapter).edit_message is not BasePlatformAdapter.edit_message
             )
-            _adapter_can_edit = type(adapter).edit_message is not BasePlatformAdapter.edit_message
-            if not _adapter_can_edit and not _explicit_platform_tool_progress:
-                while not progress_queue.empty():
-                    try:
-                        progress_queue.get_nowait()
-                    except Exception:
-                        break
-                return
+            _adapter_can_edit = (
+                bool(_supports_edit_attr)
+                if _supports_edit_attr is not None
+                else _adapter_has_edit_override
+            )
 
-            progress_lines = []      # Accumulated tool lines
-            progress_msg_id = None   # ID of the progress message to edit
+            progress_lines = []      # Accumulated tool lines for the current editable bubble
+            progress_msg_id = None   # ID of the current progress message to edit
             can_edit = _adapter_can_edit  # False on no-edit platforms: send each line
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
+
+            _progress_len_fn = (
+                adapter.message_len_fn
+                if isinstance(adapter, BasePlatformAdapter)
+                else len
+            )
+            try:
+                _raw_progress_limit = int(getattr(adapter, "MAX_MESSAGE_LENGTH", 4000) or 4000)
+            except Exception:
+                _raw_progress_limit = 4000
+            _PROGRESS_TEXT_LIMIT = max(
+                1,
+                _raw_progress_limit - (64 if _raw_progress_limit > 128 else 0),
+            )
+
+            _edit_accepts_metadata = False
+            if _progress_metadata:
+                try:
+                    _edit_params = inspect.signature(adapter.edit_message).parameters
+                    _edit_accepts_metadata = (
+                        "metadata" in _edit_params
+                        or any(
+                            param.kind is inspect.Parameter.VAR_KEYWORD
+                            for param in _edit_params.values()
+                        )
+                    )
+                except (TypeError, ValueError):
+                    _edit_accepts_metadata = False
+
+            async def _edit_progress_message(message_id: str, content: str):
+                kwargs = {
+                    "chat_id": source.chat_id,
+                    "message_id": message_id,
+                    "content": content,
+                }
+                if _edit_accepts_metadata:
+                    kwargs["metadata"] = _progress_metadata
+                return await adapter.edit_message(**kwargs)
+
+            def _progress_text(lines: list) -> str:
+                return "\n".join(str(line) for line in lines)
+
+            def _split_progress_groups(lines: list) -> list[list]:
+                groups: list[list] = []
+                current: list = []
+                for line in lines:
+                    candidate = current + [line]
+                    if current and _progress_len_fn(_progress_text(candidate)) > _PROGRESS_TEXT_LIMIT:
+                        groups.append(current)
+                        current = [line]
+                    else:
+                        current = candidate
+                if current:
+                    groups.append(current)
+                return groups
+
+            def _track_progress_result(result) -> None:
+                if (
+                    _cleanup_progress
+                    and getattr(result, "success", False)
+                    and getattr(result, "message_id", None)
+                ):
+                    _cleanup_msg_ids.append(str(result.message_id))
+
+            async def _send_progress_text(text: str):
+                result = await adapter.send(
+                    chat_id=source.chat_id,
+                    content=text,
+                    reply_to=_progress_reply_to,
+                    metadata=_progress_metadata,
+                )
+                _track_progress_result(result)
+                return result
+
+            async def _roll_progress_overflow_if_needed() -> bool:
+                nonlocal progress_msg_id, progress_lines, can_edit
+                if not progress_lines or not can_edit:
+                    return False
+                groups = _split_progress_groups(progress_lines)
+                if len(groups) <= 1:
+                    return False
+
+                first_text = _progress_text(groups[0])
+                if progress_msg_id is not None:
+                    result = await _edit_progress_message(progress_msg_id, first_text)
+                    if not result.success:
+                        can_edit = False
+                        return False
+                else:
+                    result = await _send_progress_text(first_text)
+                    if result.success and result.message_id:
+                        progress_msg_id = result.message_id
+
+                for group in groups[1:]:
+                    result = await _send_progress_text(_progress_text(group))
+                    if result.success and result.message_id:
+                        progress_msg_id = result.message_id
+
+                progress_lines = groups[-1]
+                return True
 
             while True:
                 try:
@@ -15638,6 +15728,13 @@ class GatewayRunner:
                         msg = raw
                         progress_lines.append(msg)
 
+                    if await _roll_progress_overflow_if_needed():
+                        _last_edit_ts = time.monotonic()
+                        await asyncio.sleep(0.3)
+                        if _run_still_current():
+                            await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                        continue
+
                     # Throttle edits: batch rapid tool updates into fewer
                     # API calls to avoid hitting Telegram flood control.
                     # (grammY auto-retry pattern: proactively rate-limit
@@ -15656,57 +15753,43 @@ class GatewayRunner:
 
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
-                        full_text = "\n".join(progress_lines)
-                        result = await adapter.edit_message(
-                            chat_id=source.chat_id,
-                            message_id=progress_msg_id,
-                            content=full_text,
-                        )
+                        full_text = _progress_text(progress_lines)
+                        result = await _edit_progress_message(progress_msg_id, full_text)
                         if not result.success:
                             _err = (getattr(result, "error", "") or "").lower()
-                            if "flood" in _err or "retry after" in _err:
-                                # Flood control hit — disable further edits,
-                                # switch to sending new messages only for
-                                # important updates.  Don't block 23s.
-                                logger.info(
-                                    "[%s] Progress edits disabled due to flood control",
+                            if getattr(result, "retryable", False):
+                                logger.debug(
+                                    "[%s] Transient edit failure; keeping progress editing enabled",
                                     adapter.name,
                                 )
-                            can_edit = False
+                                continue
+                            if "flood" in _err or "retry after" in _err:
+                                # Flood control hit; back off but keep editing
+                                # so the next cycle can catch up in-place.
+                                logger.info(
+                                    "[%s] Progress edit flood control, backing off",
+                                    adapter.name,
+                                )
+                                _last_edit_ts = time.monotonic()
+                            else:
+                                can_edit = False
                             _flood_result = await adapter.send(
                                 chat_id=source.chat_id,
                                 content=msg,
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
                             )
-                            if (
-                                _cleanup_progress
-                                and getattr(_flood_result, "success", False)
-                                and getattr(_flood_result, "message_id", None)
-                            ):
-                                _cleanup_msg_ids.append(str(_flood_result.message_id))
+                            _track_progress_result(_flood_result)
                     else:
                         if can_edit:
                             # First tool: send all accumulated text as new message
-                            full_text = "\n".join(progress_lines)
-                            result = await adapter.send(
-                                chat_id=source.chat_id,
-                                content=full_text,
-                                reply_to=_progress_reply_to,
-                                metadata=_progress_metadata,
-                            )
+                            full_text = _progress_text(progress_lines)
+                            result = await _send_progress_text(full_text)
                         else:
                             # Editing unsupported: send just this line
-                            result = await adapter.send(
-                                chat_id=source.chat_id,
-                                content=msg,
-                                reply_to=_progress_reply_to,
-                                metadata=_progress_metadata,
-                            )
+                            result = await _send_progress_text(str(msg))
                         if result.success and result.message_id:
                             progress_msg_id = result.message_id
-                            if _cleanup_progress:
-                                _cleanup_msg_ids.append(str(result.message_id))
 
                     _last_edit_ts = time.monotonic()
 
@@ -15726,18 +15809,16 @@ class GatewayRunner:
                                 _, base_msg, count = raw
                                 if progress_lines:
                                     progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                                    await _roll_progress_overflow_if_needed()
                             elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                                 # Content-bubble marker during drain: close off
                                 # the current progress bubble and start a fresh
                                 # one for any tool lines that arrived after.
+                                await _roll_progress_overflow_if_needed()
                                 if can_edit and progress_lines and progress_msg_id:
-                                    _pending_text = "\n".join(progress_lines)
+                                    _pending_text = _progress_text(progress_lines)
                                     try:
-                                        await adapter.edit_message(
-                                            chat_id=source.chat_id,
-                                            message_id=progress_msg_id,
-                                            content=_pending_text,
-                                        )
+                                        await _edit_progress_message(progress_msg_id, _pending_text)
                                     except Exception:
                                         pass
                                 progress_msg_id = None
@@ -15746,17 +15827,16 @@ class GatewayRunner:
                                 repeat_count[0] = 0
                             else:
                                 progress_lines.append(raw)
+                                await _roll_progress_overflow_if_needed()
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)
                     if can_edit and progress_lines and progress_msg_id:
-                        full_text = "\n".join(progress_lines)
+                        await _roll_progress_overflow_if_needed()
+                    if can_edit and progress_lines and progress_msg_id:
+                        full_text = _progress_text(progress_lines)
                         try:
-                            await adapter.edit_message(
-                                chat_id=source.chat_id,
-                                message_id=progress_msg_id,
-                                content=full_text,
-                            )
+                            await _edit_progress_message(progress_msg_id, full_text)
                         except Exception:
                             pass
                     return
