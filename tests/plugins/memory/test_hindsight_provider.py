@@ -261,6 +261,8 @@ class TestConfig:
             "idle_timeout": 0,
         })
 
+        assert env["HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU"] == "true"
+        assert env["HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU"] == "true"
         assert env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "0"
 
     def test_embedded_profile_env_includes_idle_timeout_from_env(self, monkeypatch):
@@ -332,6 +334,8 @@ class TestPostSetup:
             "HINDSIGHT_API_LLM_API_KEY=sk-local-test\n"
             "HINDSIGHT_API_LLM_MODEL=gpt-4o-mini\n"
             "HINDSIGHT_API_LOG_LEVEL=info\n"
+            "HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU=true\n"
+            "HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU=true\n"
             "HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT=300\n"
         )
 
