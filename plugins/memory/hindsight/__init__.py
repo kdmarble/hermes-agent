@@ -49,7 +49,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_API_URL = "https://api.hindsight.vectorize.io"
 _DEFAULT_LOCAL_URL = "http://localhost:8888"
-_MIN_CLIENT_VERSION = "0.4.22"
+_PINNED_CLIENT_VERSION = "0.7.0"
+_PINNED_LOCAL_VERSION = "0.7.0"
+_MIN_CLIENT_VERSION = _PINNED_CLIENT_VERSION
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
 # Mirrors hindsight-integrations/openclaw — Hindsight 0.5.0 added
@@ -662,9 +664,8 @@ class HindsightMemoryProvider(MemoryProvider):
         env_writes: dict = {}
 
         # Step 2: Install/upgrade deps for selected mode
-        _MIN_CLIENT_VERSION = "0.4.22"
-        cloud_dep = f"hindsight-client>={_MIN_CLIENT_VERSION}"
-        local_dep = "hindsight-all"
+        cloud_dep = f"hindsight-client=={_PINNED_CLIENT_VERSION}"
+        local_dep = f"hindsight-all=={_PINNED_LOCAL_VERSION}"
         if mode == "local_embedded":
             deps_to_install = [local_dep]
         elif mode == "local_external":
@@ -1069,13 +1070,13 @@ class HindsightMemoryProvider(MemoryProvider):
         start_ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self._document_id = f"{self._session_id}-{start_ts}"
 
-        # Check client version and auto-upgrade if needed
+        # Check client version and align with the pinned Hermes integration.
         try:
             from importlib.metadata import version as pkg_version
             from packaging.version import Version
             installed = pkg_version("hindsight-client")
             if Version(installed) < Version(_MIN_CLIENT_VERSION):
-                logger.warning("hindsight-client %s is outdated (need >=%s), attempting upgrade...",
+                logger.warning("hindsight-client %s is outdated (need %s), attempting upgrade...",
                                installed, _MIN_CLIENT_VERSION)
                 import shutil
                 import subprocess
@@ -1085,15 +1086,15 @@ class HindsightMemoryProvider(MemoryProvider):
                     try:
                         subprocess.run(
                             [uv_path, "pip", "install", "--python", sys.executable,
-                             "--quiet", "--upgrade", f"hindsight-client>={_MIN_CLIENT_VERSION}"],
+                             "--quiet", "--upgrade", f"hindsight-client=={_PINNED_CLIENT_VERSION}"],
                             check=True, timeout=120, capture_output=True,
                         )
-                        logger.info("hindsight-client upgraded to >=%s", _MIN_CLIENT_VERSION)
+                        logger.info("hindsight-client aligned to %s", _PINNED_CLIENT_VERSION)
                     except Exception as e:
-                        logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client>=%s'",
-                                       e, _MIN_CLIENT_VERSION)
+                        logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client==%s'",
+                                       e, _PINNED_CLIENT_VERSION)
                 else:
-                    logger.warning("uv not found. Run: pip install 'hindsight-client>=%s'", _MIN_CLIENT_VERSION)
+                    logger.warning("uv not found. Run: pip install 'hindsight-client==%s'", _PINNED_CLIENT_VERSION)
         except Exception:
             pass  # packaging not available or other issue — proceed anyway
 
