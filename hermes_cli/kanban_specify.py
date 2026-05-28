@@ -211,7 +211,11 @@ def specify_task(
 
     try:
         msg = resp.choices[0].message
-        raw = (msg.content or msg.reasoning_content or "")
+        content = msg.content if isinstance(msg.content, str) else ""
+        reasoning_content = (
+            msg.reasoning_content if isinstance(msg.reasoning_content, str) else ""
+        )
+        raw = content or reasoning_content
     except Exception:
         raw = ""
 

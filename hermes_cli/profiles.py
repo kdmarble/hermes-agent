@@ -329,6 +329,8 @@ def check_alias_collision(name: str) -> Optional[str]:
 
     # Check existing commands in PATH
     wrapper_dir = _get_wrapper_dir()
+    if str(wrapper_dir) not in os.environ.get("PATH", "").split(os.pathsep):
+        return None
     try:
         result = subprocess.run(
             ["which", canon], capture_output=True, text=True, timeout=5,

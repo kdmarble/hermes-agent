@@ -381,6 +381,45 @@ def _run_review_in_thread(
             # owns the loop and the agent-loop tools dispatch.
             if _parent_api_mode == "codex_app_server":
                 _parent_api_mode = "codex_responses"
+            _review_model = agent.model
+            _review_provider = agent.provider
+            _review_max_iterations = 16
+            _review_base_url = _parent_runtime.get("base_url") or None
+            _review_api_key = _parent_runtime.get("api_key") or None
+            _review_credential_pool = getattr(agent, "_credential_pool", None)
+            _configured_runtime = False
+            try:
+                from hermes_cli.config import load_config
+
+                _cfg = load_config()
+                _bg_cfg = (_cfg.get("background_review") or {}) if isinstance(_cfg, dict) else {}
+            except Exception:
+                _bg_cfg = {}
+            if isinstance(_bg_cfg, dict) and _bg_cfg:
+                _configured_runtime = True
+                _review_model = _bg_cfg.get("model") or _review_model
+                _review_provider = _bg_cfg.get("provider") or _review_provider
+                try:
+                    _review_max_iterations = int(_bg_cfg.get("max_iterations", _review_max_iterations))
+                except (TypeError, ValueError):
+                    _review_max_iterations = 16
+                try:
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                    _runtime = resolve_runtime_provider(
+                        requested=_review_provider,
+                        target_model=_review_model,
+                    )
+                except Exception:
+                    _runtime = {}
+                if isinstance(_runtime, dict):
+                    _review_provider = _runtime.get("provider") or _review_provider
+                    _parent_api_mode = _runtime.get("api_mode") or _parent_api_mode
+                    if _parent_api_mode == "codex_app_server":
+                        _parent_api_mode = "codex_responses"
+                    _review_base_url = _runtime.get("base_url") or _review_base_url
+                    _review_api_key = _runtime.get("api_key") or _review_api_key
+                    _review_credential_pool = _runtime.get("credential_pool") or _review_credential_pool
             # skip_memory=True keeps the review fork from
             # touching external memory plugins (honcho, mem0,
             # supermemory, etc.).  Without it, the fork's
@@ -399,21 +438,23 @@ def _run_review_in_thread(
             # Match parent's toolset config so ``tools[]`` is byte-identical
             # in the request body — Anthropic's cache key includes it.
             # (The runtime whitelist below still restricts dispatch.)
-            review_agent = AIAgent(
-                model=agent.model,
-                max_iterations=16,
-                quiet_mode=True,
-                platform=agent.platform,
-                provider=agent.provider,
-                api_mode=_parent_api_mode,
-                base_url=_parent_runtime.get("base_url") or None,
-                api_key=_parent_runtime.get("api_key") or None,
-                credential_pool=getattr(agent, "_credential_pool", None),
-                parent_session_id=agent.session_id,
-                enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-                disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-                skip_memory=True,
-            )
+            review_kwargs = {
+                "model": _review_model,
+                "max_iterations": _review_max_iterations,
+                "quiet_mode": True,
+                "platform": agent.platform,
+                "provider": _review_provider,
+                "api_mode": _parent_api_mode,
+                "base_url": _review_base_url,
+                "api_key": _review_api_key,
+                "credential_pool": _review_credential_pool,
+                "parent_session_id": agent.session_id,
+                "skip_memory": True,
+            }
+            if not _configured_runtime:
+                review_kwargs["enabled_toolsets"] = getattr(agent, "enabled_toolsets", None)
+                review_kwargs["disabled_toolsets"] = getattr(agent, "disabled_toolsets", None)
+            review_agent = AIAgent(**review_kwargs)
             review_agent._memory_write_origin = "background_review"
             review_agent._memory_write_context = "background_review"
             review_agent._memory_store = agent._memory_store
