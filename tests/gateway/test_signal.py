@@ -1,7 +1,6 @@
 """Tests for Signal messenger platform adapter."""
 import asyncio
 import base64
-import json
 import subprocess
 import pytest
 from pathlib import Path
