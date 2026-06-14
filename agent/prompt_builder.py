@@ -1148,12 +1148,43 @@ def build_skills_system_prompt(
     the rendered index. Nothing is ever hidden: every skill name stays
     visible and loadable via ``skill_view`` / ``skills_list``; only the
     descriptions are dropped, and a footer note explains the demotion.
+
+    ``skills.catalog_mode`` config option (default ``"full"``):
+      - ``"full"`` — inject the complete skill catalog into the system prompt
+      - ``"search_only"`` — skip the catalog; inject a compact note telling
+        the model to use ``skills_list()`` / ``skill_view(name)`` for
+        on-demand discovery. Saves ~3-4K tokens per turn with large skill sets.
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
 
     if not skills_dir.exists() and not external_dirs:
         return ""
+
+    # ── Check catalog_mode config ──────────────────────────────────────
+    try:
+        from hermes_cli.config import load_config
+        _cfg = load_config()
+        _skills_cfg = (_cfg.get("skills") or {})
+        _catalog_mode = str(_skills_cfg.get("catalog_mode", "full")).lower()
+    except Exception:
+        _catalog_mode = "full"
+
+    if _catalog_mode == "search_only":
+        return (
+            "\n"
+            "## Skills (on-demand)\n"
+            "You have skills installed. Use ``skills_list()`` to discover available\n"
+            "skills and ``skill_view(name)`` to load a specific one.\n"
+            "When working on a task, think about what kind of knowledge or workflow\n"
+            "might exist as a skill — then call skills_list() to check. Skills contain\n"
+            "specialized instructions, API details, tool-specific commands,\n"
+            "and established workflows that outperform general-purpose approaches.\n"
+            "When the user asks you to configure, set up, or troubleshoot Hermes Agent\n"
+            "itself, load the ``hermes-agent`` skill first.\n"
+            "Fix skills with skill_manage(action='patch') if they have issues.\n"
+            "After difficult tasks, offer to save the approach as a skill.\n"
+        )
 
     # ── Layer 1: in-process LRU cache ─────────────────────────────────
     # Include the resolved platform so per-platform disabled-skill lists
